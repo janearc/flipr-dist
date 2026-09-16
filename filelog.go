@@ -60,14 +60,6 @@ import (
 // then the bus, and a bus failure is counted and logged rather than returned,
 // because the file is the record now and a flip must not fail for a mirror.
 
-// writeOps are the operations replay applies; older files also carry read
-// records (until 2026-09-05 every read was recorded), which replay skips.
-var writeOps = map[string]bool{
-	"SetFlag":          true,
-	"PublishNamespace": true,
-	"DeleteNamespace":  true,
-}
-
 // FileSink appends Operation records to a file.
 type FileSink struct {
 	mu         sync.Mutex

@@ -597,14 +597,14 @@ func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
 			),
 		)
 	}
-	if err, at, failed := s.store.LastWriteFailure(); failed {
+	if f, failed := s.store.LastWriteFailure(); failed {
 		reasons = append(
 			reasons,
 			fmt.Sprintf(
 				"last store write failed %s ago and no write "+
 					"has succeeded since: %s",
-				time.Since(at).Round(time.Second),
-				err.Error(),
+				time.Since(f.at).Round(time.Second),
+				f.err.Error(),
 			),
 		)
 	}

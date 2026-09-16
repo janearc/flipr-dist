@@ -632,12 +632,12 @@ func (s *Store) noteWriteFailure(err error) {
 
 // LastWriteFailure reports the most recent write failure that a later write
 // has not cleared, if any.
-func (s *Store) LastWriteFailure() (error, time.Time, bool) {
+func (s *Store) LastWriteFailure() (writeFailure, bool) {
 	v, ok := s.lastWriteErr.Load().(writeFailure)
 	if !ok || v.err == nil {
-		return nil, time.Time{}, false
+		return writeFailure{}, false
 	}
-	return v.err, v.at, true
+	return v, true
 }
 
 // Unlogged is a write that was committed and then could not be recorded in

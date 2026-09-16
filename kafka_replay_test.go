@@ -122,7 +122,7 @@ func fakeTopic(
 }
 
 // runReplay replays the fake topic into a fresh store.
-func runReplay(t *testing.T, brokers []string) (int, error, *Store) {
+func runReplay(t *testing.T, brokers []string) (int, *Store, error) {
 	t.Helper()
 	store := openStore(t, t.TempDir())
 	t.Cleanup(func() { store.Close() })
@@ -134,7 +134,7 @@ func runReplay(t *testing.T, brokers []string) (int, error, *Store) {
 		store.ApplyReplayed,
 		func(s, v string) error { _, err := store.DeleteNamespace(s, v); return err },
 	)
-	return n, err, store
+	return n, store, err
 }
 
 // TestReplayReadsToTheEndOffsetNotAQuietSecond: a broker that
@@ -154,7 +154,7 @@ func TestReplayReadsToTheEndOffsetNotAQuietSecond(t *testing.T) {
 		)
 	}
 	brokers := fakeTopic(t, recs, 1500*time.Millisecond)
-	n, err, store := runReplay(t, brokers)
+	n, store, err := runReplay(t, brokers)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +182,7 @@ func TestReplayRefusesAStoreMissingRecords(t *testing.T) {
 		setRecord("a", "v", "k3", `not json`),
 	}
 	brokers := fakeTopic(t, recs, 0)
-	n, err, _ := runReplay(t, brokers)
+	n, _, err := runReplay(t, brokers)
 	if err == nil {
 		t.Fatal("replay skipped three records and reported success")
 	}
@@ -199,7 +199,7 @@ func TestReplayRefusesAStoreMissingRecords(t *testing.T) {
 func TestReplayOfAnEmptyTopicIsImmediate(t *testing.T) {
 	brokers := fakeTopic(t, nil, 0)
 	start := time.Now()
-	n, err, _ := runReplay(t, brokers)
+	n, _, err := runReplay(t, brokers)
 	if err != nil || n != 0 {
 		t.Fatalf("empty topic: applied=%d err=%v", n, err)
 	}
@@ -217,7 +217,7 @@ func TestReplayAppliesDeletesInOrder(t *testing.T) {
 		setRecord("dodo", "new", "k2", `{"boolValue":true}`),
 	}
 	brokers := fakeTopic(t, recs, 0)
-	n, err, store := runReplay(t, brokers)
+	n, store, err := runReplay(t, brokers)
 	if err != nil || n != 3 {
 		t.Fatalf("applied=%d err=%v", n, err)
 	}
@@ -248,7 +248,7 @@ func TestReplayWalksPastReadRecords(t *testing.T) {
 		}
 	}
 	brokers := fakeTopic(t, recs, 0)
-	n, err, _ := runReplay(t, brokers)
+	n, _, err := runReplay(t, brokers)
 	if err != nil {
 		t.Fatal(err)
 	}
