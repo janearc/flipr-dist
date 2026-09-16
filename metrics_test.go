@@ -88,7 +88,8 @@ func TestRenderIsStable(t *testing.T) {
 	r.Counter("a_total", "One").Inc()
 	r.Counter("a_total", "Two").Inc()
 	r.DeclareGauge("z_gauge", "help", func() int64 { return 3 })
-	if r.Render() != r.Render() {
+	first, second := r.Render(), r.Render()
+	if first != second {
 		t.Fatal("render is not deterministic")
 	}
 }
@@ -143,7 +144,9 @@ func TestSameHandleIsReturnedForSameLabels(t *testing.T) {
 			got,
 		)
 	}
-	if r.Histogram("h_seconds", "a") != r.Histogram("h_seconds", "a") {
+	once := r.Histogram("h_seconds", "a")
+	again := r.Histogram("h_seconds", "a")
+	if once != again {
 		t.Fatal("histogram handles are not stable")
 	}
 }
