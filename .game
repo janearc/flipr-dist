@@ -1,0 +1,18 @@
+# game: this repository
+#
+# name is the project: it is the block in the builder's own config that
+# says where this tree's two remotes are. nothing here holds a remote,
+# and a builder who has no block for it builds locally.
+name flipr-dist
+
+# game: flipr-dist, the flag store and its clients
+
+# a third party's address, inside the npm lockfile's package metadata
+exclude clients/typescript/package-lock.json
+
+# the go client is its own module, and the other two clients have their own
+# toolchains; each is a target so a stack build runs all of them
+target goclient clients/go :: go test ./...
+target ts clients/typescript :: npm ci --silent
+target ts clients/typescript :: npm test
+target py . :: python3 -m unittest discover -s clients/python -p *_test.py

@@ -1,0 +1,123 @@
+#!/bin/sh
+# flipr -- start, stop and inspect the flag store, from a terminal.
+#
+# What it controls: one flipr pod in the `flipr` namespace of a k3d
+# cluster, reached by name at http://flipr.test. Every service asks
+# it before doing anything expensive, so if it is down the network is down,
+# by design. That is the thing to hold in mind before typing `stop`.
+#
+#   flipr status                 pod, image, restarts, and what /health says
+#   flipr health                 the raw /health JSON
+#   flipr start                  scale the deployment to one (idempotent)
+#   flipr stop --yes             scale it to zero. RING 0: everything refuses
+#                                until it is back. The flag is deliberate.
+#   flipr restart                rollout restart, SAME image. New code is
+#                                bin/deploy.sh <environment>, never this.
+#   flipr logs                   follow the pod's log
+#   flipr flags                  every namespace and flag, one line each
+#   flipr get SVC VER KEY        one flag
+#   flipr set SVC VER KEY VALUE "reason"
+#                                flip one flag. VALUE is protojson for a
+#                                flipr.v1.Value: '{"boolValue":false}',
+#                                '{"stringValue":"x"}', '{"intValue":"3"}'.
+#                                The reason is required and is recorded.
+#
+# Needs kubectl, curl and a python3 with only its standard library, and no
+# other tooling: it is what an operator reaches for when everything else is
+# down. Link it onto your PATH.
+#
+# Env: FLIPR_URL (default http://flipr.test) and FLIPR_CONTEXT (default
+# k3d-local). A name, never an address and port.
+set -eu
+
+CTX="${FLIPR_CONTEXT:-k3d-local}"
+NS=flipr
+URL="${FLIPR_URL:-http://flipr.test}"
+K="kubectl --context $CTX -n $NS"
+
+# tool runs the operator's verb through fliprctl when it is installed
+# (bin/install.sh links it; it is flipr's own binary and announces itself as
+# fliprctl, which is the retirement the freeze audit names for this
+# script's curls), and falls through to curl where it is not.
+tool() {
+  if command -v fliprctl >/dev/null 2>&1; then
+    FLIPR_URL="$URL" exec fliprctl "$@"
+  fi
+  return 1
+}
+
+# rpc posts one protojson body to a flipr method and prints the answer:
+# the curl path, for a host without fliprctl. It is `none` on flipr's
+# client counter and is refused when refuse.other is on.
+rpc() {
+  curl -s --max-time 5 -X POST -H 'Content-Type: application/json' \
+    -H "X-Flipr-Caller: bin/flipr($(id -un)@$(hostname -s))" \
+    "$URL/flipr.v1.FliprService/$1" -d "$2"
+}
+
+# usage prints the verb list from the header and exits non-zero.
+usage() {
+  sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'
+  exit 2
+}
+
+case "${1:-}" in
+  status)
+    $K get deploy/flipr -o custom-columns='DEPLOY:.metadata.name,READY:.status.readyReplicas,IMAGE:.spec.template.spec.containers[0].image' 2>&1
+    $K get pods -l app=flipr -o custom-columns='POD:.metadata.name,READY:.status.containerStatuses[0].ready,RESTARTS:.status.containerStatuses[0].restartCount,STARTED:.status.startTime,LAST:.status.containerStatuses[0].lastState.terminated.reason' 2>&1
+    printf '%s/health: ' "$URL"
+    curl -s --max-time 5 "$URL/health" || echo "no answer from $URL"
+    ;;
+  health)
+    curl -s --max-time 5 "$URL/health" || { echo "no answer from $URL" >&2; exit 1; }
+    ;;
+  start)
+    $K scale deploy/flipr --replicas=1
+    $K rollout status deploy/flipr --timeout=180s
+    ;;
+  stop)
+    if [ "${2:-}" != "--yes" ]; then
+      echo "flipr stop: this is RING 0. Every service refuses its expensive work until flipr is back," >&2
+      echo "flipr stop: and the pod's Recreate strategy means there is no overlap. Say --yes to mean it." >&2
+      exit 2
+    fi
+    $K scale deploy/flipr --replicas=0
+    echo "flipr scaled to zero in $CTX; \`flipr start\` brings it back"
+    ;;
+  restart)
+    $K rollout restart deploy/flipr
+    $K rollout status deploy/flipr --timeout=180s
+    ;;
+  logs)
+    $K logs -f deploy/flipr
+    ;;
+  flags)
+    tool flags || rpc ListNamespaces '{}' | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+for ns in d.get("namespaces", []):
+    for f in ns.get("flags", []):
+        v = f.get("value") or {}
+        val = next(iter(v.values()), None) if v else None
+        print("%-32s %-28s %-8s %s%s" % (ns["service"] + "@" + ns["version"], f["key"],
+              json.dumps(val), "expensive " if f.get("expensive") else "", ""))
+'
+    ;;
+  get)
+    [ $# -eq 4 ] || usage
+    tool get "$2" "$3" "$4" || rpc GetFlag "{\"service\":\"$2\",\"version\":\"$3\",\"key\":\"$4\"}"
+    ;;
+  set)
+    [ $# -eq 6 ] || usage
+    [ -n "$6" ] || { echo "flipr set: the reason is required, and it is recorded" >&2; exit 2; }
+    # fliprctl reads the value's type from its spelling (true, 7, a word);
+    # the curl path takes the JSON value the older form of this verb took
+    tool set "$2" "$3" "$4" "$(printf '%s' "$5" | sed 's/^"\(.*\)"$/\1/')" --reason "$6" || {
+      body=$(python3 -c 'import json,sys; print(json.dumps({"service":sys.argv[1],"version":sys.argv[2],"key":sys.argv[3],"value":json.loads(sys.argv[4]),"reason":sys.argv[5]}))' "$2" "$3" "$4" "$5" "$6")
+      rpc SetFlag "$body"
+    }
+    ;;
+  *)
+    usage
+    ;;
+esac

@@ -1,0 +1,21 @@
+# Generation for the standalone Go client module (clients/go).
+#
+# WHY A SECOND FILE AND A SECOND COPY OF THE TYPES. clients/go is its own Go
+# module on purpose: a consumer that imports the client must not inherit
+# flipr's server dependencies -- franz-go, bbolt, and big-little-mesh -- when
+# all it wants is to ask a question. A submodule cannot import the parent's gen/ without
+# depending on the parent, which is the thing being avoided.
+#
+# So the wire types are generated TWICE from the ONE proto, by one script, into
+# two modules. The duplication is mechanical and gen-freshness covers both:
+# run bin/gen.sh and the tree must be clean.
+version: v2
+managed:
+  enabled: true
+  override:
+    - file_option: go_package_prefix
+      value: github.com/janearc/flipr-dist/clients/go
+plugins:
+  - local: protoc-gen-go
+    out: clients/go
+    opt: module=github.com/janearc/flipr-dist/clients/go

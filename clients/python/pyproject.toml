@@ -1,0 +1,28 @@
+# flipr-client, packaged.
+#
+# The Go client next door explains why it is its own module and the same
+# reasoning applies here verbatim: a consumer importing this must not inherit
+# flipr's server dependencies. A metrics daemon that wants to read one flag has
+# no business building against a kafka client.
+#
+# STDLIB ONLY, and that is a promise rather than an accident -- `dependencies`
+# below is empty and should stay empty. This client gets vendored into small
+# services and copied into containers; every dependency added here is a
+# dependency added to all of them, and the first one will be the reason
+# somebody hand-copies the file again instead of installing it.
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "flipr-client"
+version = "1.1.0"
+description = "Reference Python client for flipr, with backoff."
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.hatch.build.targets.wheel]
+packages = ["flipr_client"]
+
+[tool.hatch.version]
+path = "flipr_client/__init__.py"

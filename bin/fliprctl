@@ -1,0 +1,27 @@
+#!/bin/sh
+# fliprctl -- the operator's tool over flipr's files, for the person at the
+# keyboard (RUNBOOK-restore.md). It is `flipr ctl` from the same binary the
+# pod runs, built from the checkout this script is linked from, so the tool
+# and the server agree about the files. Every argument passes through.
+#
+#   fliprctl status | log [-tail N] | assess | lock ... | unlock ... | restore ...
+#
+# FLIPR_DB and FLIPR_OPLOG_FILE name the store and the oplog on the host; the
+# defaults below are the local environment's, the pod's /state mounted from
+# $DATA_ROOT/flipr (kube/environments/local.env). kube/20-deployment.yaml
+# names both explicitly, and the oplog is flipr.oplog beside flipr.db, not
+# the binary's <db>.oplog default: the first `fliprctl status` on a host
+# looked at a file that does not exist.
+set -eu
+REPO="$(cd "$(dirname "$(readlink "$0" || echo "$0")")/.." && pwd)"
+BIN="$HOME/.local/share/flipr/fliprctl"
+STAMP="$HOME/.local/share/flipr/fliprctl.commit"
+HEAD="$(git -C "$REPO" rev-parse --short HEAD)"
+if [ ! -x "$BIN" ] || [ "$(cat "$STAMP" 2>/dev/null)" != "$HEAD" ]; then
+  mkdir -p "$(dirname "$BIN")"
+  (cd "$REPO" && go build -o "$BIN" .)
+  echo "$HEAD" > "$STAMP"
+fi
+export FLIPR_DB="${FLIPR_DB:-$HOME/var/local/flipr/flipr.db}"
+export FLIPR_OPLOG_FILE="${FLIPR_OPLOG_FILE:-$HOME/var/local/flipr/flipr.oplog}"
+exec "$BIN" ctl "$@"

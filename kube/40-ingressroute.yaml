@@ -1,0 +1,17 @@
+# traefik.io/v1alpha1 IngressRoute, not a plain Ingress: prod's idiom, and the
+# charter says replicate prod's orchestration. Addressed by NAME -- flipr.test
+# -- never by address and port.
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: flipr
+  namespace: flipr
+spec:
+  entryPoints:
+    - web
+  routes:
+    - match: Host(`flipr.test`)
+      kind: Rule
+      services:
+        - name: flipr
+          port: 80

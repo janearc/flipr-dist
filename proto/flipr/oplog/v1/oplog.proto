@@ -1,0 +1,78 @@
+syntax = "proto3";
+
+// The op-log record: one operation flipr performed, bound for the
+// `flipr.oplog` kafka topic, serialised as protojson bytes.
+//
+// WHY KAFKA: immutability. The bbolt file is mutable by whoever owns the
+// disk; kafka is append-only with retention, so the record there is the
+// tamper-evident audit of every read and every flip -- and the REPLAY SOURCE:
+// a flipr that boots onto a fresh store consumes this topic and restores
+// every operator flip, which is flipr's own half of the wipe self-heal.
+//
+// THE WIRE FORMAT IS CONFLUENT SR-FRAMED PROTOBUF via blm/emit -- the same
+// path hm's heartbeats ride. An earlier revision argued itself into plain
+// protojson to avoid a registry dependency at produce time; hm counted every
+// record off-contract, which is the contract system doing its job, and the
+// argument dissolved on inspection: the registry is furnished in the same
+// bus trio as kafka, which already sits beneath flipr in the ruled boot
+// order, and blm/emit caches the schema id after first use. The early
+// unframed protojson records remain in the topic -- it is immutable -- and
+// replay reads both generations.
+package flipr.oplog.v1;
+
+option go_package = "github.com/janearc/flipr-dist/gen/oplogpb";
+
+// One operation. Fields absent from a given op kind are simply unset --
+// protojson omits them, and the record stays greppable.
+message Operation {
+  // RFC3339Nano, stamped by flipr when the operation happened.
+  string ts = 1;
+  // GetFlag | GetNamespace | SetFlag | PublishNamespace | ListNamespaces
+  string op = 2;
+  string service = 3;
+  string version = 4;
+  string key = 5;
+  // The value as a string, exactly as the operational log renders it.
+  string value = 6;
+  // The stated reason, present on every SetFlag by refusal.
+  string reason = 7;
+  // Whether a read found what it asked for.
+  bool found = 8;
+  // How many flags a PublishNamespace touched.
+  int32 flags = 9;
+  // Which flipr wrote this: version (commit hash) and store generation, so a
+  // replay can tell its own records from a predecessor store's.
+  string flipr_version = 10;
+  string store_generation = 11;
+  // The typed value as protojson of flipr.v1.Value, present on SetFlag.
+  // `value` above is the human-greppable rendering; THIS is what replay
+  // applies, so a string flag whose value happens to spell "true" survives a
+  // wipe as a string rather than resurrecting as a bool.
+  string value_json = 12;
+  // WHO, as far as the wire can tell. remote is the peer address flipr saw;
+  // caller is the X-Flipr-Caller header when the client supplied one.
+  // Added after a flip arrived with reason "i am root" and the record could
+  // not say which surface, let alone which hand: a reason without an
+  // identity is half an audit. Self-declared, so it is attribution for the
+  // honest and a tripwire for the lazy -- real identity needs the auth
+  // surface, which is the front door's job, not the store's.
+  string remote = 13;
+  string caller = 14;
+  // The store revision this write created: bumped by one inside the write's
+  // own transaction, and monotonic across the whole record, not one
+  // generation of the store: a fresh store that heals from the file
+  // continues from the highest stamp in it, and a restore takes the next
+  // number above everything it undid. So a number names one record
+  // forever, which is what lets a restore name the revision it replays to
+  // (RUNBOOK-restore.md). Unset on records written before 2026-09-06 and on
+  // read records, which older files carry.
+  uint64 revision = 15;
+  // A Restore record's range, as numbers so the replayer never parses
+  // prose: the records stamped in (restore_to, restore_from] were undone by
+  // it. Replay honours every Restore that still stands (one is undone by a
+  // later Restore whose range holds it) and skips the records they undid,
+  // so a store healed from a file that holds a restore comes back as the
+  // restore left it, not as it was before. Unset on every other op.
+  uint64 restore_to = 16;
+  uint64 restore_from = 17;
+}

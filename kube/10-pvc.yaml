@@ -1,0 +1,57 @@
+# The bbolt file lives here. THIS VOLUME IS THE FLAGS: lose it and every flag
+# reverts to its published default at the next onboarding pass, and the
+# operator's flips come back only through the oplog replay.
+#
+# WHERE IT IS: a static PersistentVolume on the host path
+# <DATA_ROOT>/flipr, which the k3d node bind-mounts, so the file outlives
+# the node. The first version provisioned the claim with local-path INSIDE
+# the node's docker volume, and a `k3d cluster delete` deleted the flags;
+# the manifest said otherwise. This is kafka's and
+# zookeeper's shape, for the same reason.
+#
+# storageClassName "" on both halves pins the claim to THIS volume: the
+# cluster's default dynamic provisioner would otherwise hand flipr a fresh
+# empty volume, which is the failure the previous shape had in the first
+# place. Retain, so that no claim operation can remove the directory.
+#
+# 1Gi is three orders of magnitude more than the store will use. Flags are
+# hundreds of bytes each; the size is set by "never think about this again",
+# not by need.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: flipr-state
+  labels:
+    app: flipr
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  # Bound to flipr's claim and nothing else, whatever asks first.
+  claimRef:
+    namespace: flipr
+    name: flipr-state
+  hostPath:
+    # ${DATA_ROOT} is substituted at apply from kube/environments/<env>.env.
+    path: ${DATA_ROOT}/flipr
+    # Directory, not DirectoryOrCreate: the directory is created by hand on
+    # the host as part of the migration, and a pod that could create it
+    # would also start clean and serve nothing while looking healthy.
+    type: Directory
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: flipr-state
+  namespace: flipr
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: ""
+  volumeName: flipr-state
+  resources:
+    requests:
+      storage: 1Gi

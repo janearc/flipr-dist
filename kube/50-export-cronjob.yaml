@@ -1,0 +1,84 @@
+# The flag dump, on a schedule. Every hour, every namespace and flag as
+# ListNamespaces answers it, written to the host under
+# <DATA_ROOT>/backups/flipr/, one JSON file per run.
+#
+# WHY. flipr's designed recovery is to replay the kafka oplog into a fresh
+# store, and the flags volume now lives on the host (kube/10-pvc.yaml). A dump
+# routes around both: it depends on neither replay working nor the volume
+# surviving, and it is what a person reads first when deciding what should
+# come back. There is no restore tool for dumps by design: a person reads
+# one and decides. It was added alongside the volume move.
+#
+# A DUMP TAKEN DURING AN OUTAGE IS WORSE THAN NONE, because it looks like a
+# backup. So the job compares what it wrote against /metrics: the number of
+# flags and namespaces in the file must equal flipr_flags and
+# flipr_namespaces, or the file is removed and the job fails where a person
+# can see it (kubectl -n flipr get jobs).
+#
+# busybox because it is already on the node and has wget, date and find; the
+# service is reached by its in-cluster name. Runs as root because the
+# hostPath directory is root-owned inside the node; the bind mount maps the
+# files to the operator on the host.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: flipr-export
+  namespace: flipr
+  labels:
+    app: flipr-export
+spec:
+  schedule: "23 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            app: flipr-export
+        spec:
+          restartPolicy: OnFailure
+          securityContext:
+            runAsUser: 0
+          containers:
+            - name: export
+              image: busybox:1.36
+              imagePullPolicy: IfNotPresent
+              command:
+                - sh
+                - -c
+                - |
+                  set -eu
+                  URL=http://flipr.flipr.svc.cluster.local/flipr.v1.FliprService/ListNamespaces
+                  METRICS=http://flipr.flipr.svc.cluster.local/metrics
+                  OUT=/backups/flags-$(date -u +%Y%m%dT%H%M%SZ).json
+                  wget -q -O "$OUT" --post-data='{}' --header='Content-Type: application/json' "$URL"
+                  flags=$(grep -o '"key":' "$OUT" | wc -l | tr -d ' ')
+                  namespaces=$(grep -o '"service":' "$OUT" | wc -l | tr -d ' ')
+                  want_flags=$(wget -q -O- "$METRICS" | awk '$1=="flipr_flags"{print $2}')
+                  want_ns=$(wget -q -O- "$METRICS" | awk '$1=="flipr_namespaces"{print $2}')
+                  if [ "$flags" != "$want_flags" ] || [ "$namespaces" != "$want_ns" ]; then
+                    echo "export REFUSED: file has $flags flags in $namespaces namespaces, flipr reports $want_flags in $want_ns; removing $OUT" >&2
+                    rm -f "$OUT"
+                    exit 1
+                  fi
+                  find /backups -name 'flags-*.json' -mtime +30 -delete
+                  echo "exported $OUT: $flags flags in $namespaces namespaces, matching /metrics"
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests: { cpu: 10m, memory: 16Mi }
+                limits: { cpu: 100m, memory: 64Mi }
+              volumeMounts:
+                - name: backups
+                  mountPath: /backups
+          volumes:
+            - name: backups
+              hostPath:
+                # ${DATA_ROOT} is substituted at apply from kube/environments/<env>.env.
+                path: ${DATA_ROOT}/backups/flipr
+                type: Directory

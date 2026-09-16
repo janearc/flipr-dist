@@ -1,0 +1,12 @@
+version: v2
+# go_package places output under gen/<pkg>/; module= strips the module prefix
+# so files land at gen/, not gen/github.com/janearc/flipr-dist/...
+#
+# protoc-gen-go ONLY. No grpc plugin: the wire is protojson over plain HTTP.
+# gRPC would drag in
+# HTTP/2 and client stubs for a service whose entire job is answering a
+# question that fits in a cache line.
+plugins:
+  - local: protoc-gen-go
+    out: .
+    opt: module=github.com/janearc/flipr-dist

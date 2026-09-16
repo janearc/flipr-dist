@@ -1,0 +1,9 @@
+# flipr's namespace. One service, its own namespace, labelled for the
+# environment the way every workload in the cluster is.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: flipr
+  labels:
+    # ${ENV} is substituted at apply from kube/environments/<env>.env.
+    mesh.env: ${ENV}

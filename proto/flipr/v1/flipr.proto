@@ -1,0 +1,214 @@
+syntax = "proto3";
+
+// flipr -- the flag store the whole mesh reads before it does anything
+// expensive.
+//
+// Named for the original at Uber: a boolean store, and you FLIP the value.
+// That is the whole idea and the schema is deliberately built to stay that
+// small. No experiments, no percentage rollouts, no targeting, no audience
+// segmentation. Those are what made the product complicated and none of them
+// are wanted here.
+//
+// The one requirement that shapes everything below: IF FLIPR IS DOWN, THE
+// NETWORK IS DOWN. Clients cache the last value they read so a live flipr does
+// not answer the same question hundreds of times a second -- but the cache is
+// a PERFORMANCE optimisation, never a fallback. A client still checks flipr is
+// there, and if it is not, the client fails rather than quietly serving a
+// stale flag. Clients cache the last read, and always check that flipr is
+// there.
+package flipr.v1;
+
+option go_package = "github.com/janearc/flipr-dist/gen/fliprpb";
+
+// A flag's value. A oneof rather than a bare bool because the charter names a
+// non-boolean case outright -- "nightly data smoothing" set to `surreal` or
+// `claude` -- and encoding that as two booleans would let both be true.
+//
+// Three cases and no more. Anything that wants richer structure is a design
+// smell at this layer: flipr answers "what should I do", not "what is my
+// configuration".
+message Value {
+  oneof kind {
+    bool bool_value = 1;
+    string string_value = 2;
+    int64 int_value = 3;
+  }
+}
+
+// One flag, and everything known about it.
+message Flag {
+  // Dotted, and the dots are the hierarchy: `nightly.smoothing`. The front end
+  // renders the tree by splitting on the dot rather than the schema carrying a
+  // nested type, which keeps the store flat and the wire trivial.
+  string key = 1;
+
+  Value value = 2;
+
+  // Why this flag exists, in one line, for whoever meets it at 03:20.
+  string description = 3;
+
+  // Does turning this on cost network, disk, cpu, or a model call?
+  //
+  // THE EMERGENCY PAGE IS THE SET WHERE THIS IS TRUE. It is a projection of
+  // this field, never a hand-maintained second list, so the two pages cannot
+  // drift apart.
+  bool expensive = 4;
+
+  // Set by flipr, not by the caller: when this value was last written.
+  string updated_at = 5;
+}
+
+// A namespace is one service at one version.
+//
+// The charter is explicit: keyed to the service AND its version, which is its
+// commit hash at deploy. `albatross-xyz` and `albatross-abc` are different
+// namespaces and both live under `albatross`. That is what makes a deploy
+// able to publish its own flags without trampling the version still running.
+message Namespace {
+  string service = 1;      // "albatross"
+  string version = 2;      // the commit hash at deploy
+  repeated Flag flags = 3;
+}
+
+// --- requests and responses ---------------------------------------------
+//
+// One message per RPC even where a field is duplicated. Sharing request types
+// across RPCs is how a schema quietly becomes un-evolvable: the moment two
+// calls disagree about one field, the shared message has to grow a mode.
+
+message GetFlagRequest {
+  string service = 1;
+  string version = 2;
+  string key = 3;
+}
+
+message GetFlagResponse {
+  Flag flag = 1;
+  // The store revision this answer was read at (see GetNamespaceRequest).
+  uint64 revision = 2;
+}
+
+// The call a client makes on startup and then rarely: fetch the whole
+// namespace in one round trip and cache it.
+message GetNamespaceRequest {
+  string service = 1;
+  string version = 2;
+  // THE CHECKPOINT. Every write bumps the store's
+  // revision by one, inside the write's own transaction. A reader that
+  // holds the revision it last saw sends it here; when it equals the
+  // current one flipr answers `unchanged` with the revision and no flags,
+  // one integer compared with one integer before anything is read. That is
+  // the whole cost of a consumer polling on its interval. Zero means "give
+  // me everything", which is what a client sends first.
+  uint64 since = 3;
+}
+
+message GetNamespaceResponse {
+  Namespace namespace = 1;
+  // The store revision this answer was read at.
+  uint64 revision = 2;
+  // True when `since` equals the current revision: nothing has changed
+  // anywhere in the store since the caller last looked, and `namespace` is
+  // unset. The caller keeps what it has.
+  bool unchanged = 3;
+}
+
+// The flip.
+message SetFlagRequest {
+  string service = 1;
+  string version = 2;
+  string key = 3;
+  Value value = 4;
+  // Who or what is flipping this, and why. Recorded and shipped to kafka.
+  // Not optional in practice: a flag flipped for no stated reason is how an
+  // outage becomes unexplainable, and this effort has already lost one event
+  // to exactly that.
+  string reason = 5;
+}
+
+message SetFlagResponse {
+  Flag flag = 1;
+  // The revision this flip created: the number a restore names.
+  uint64 revision = 2;
+}
+
+// Build-time onboarding. Part of every deployed application's BUILD PROCESS is
+// publishing its current flipr settings, so a service arrives already
+// described rather than being registered by hand afterwards.
+//
+// Idempotent: publishing the same namespace twice is the normal case, because
+// a redeploy of the same commit republishes.
+message PublishNamespaceRequest {
+  Namespace namespace = 1;
+}
+
+message PublishNamespaceResponse {
+  int32 flags_published = 1;
+  // The revision after this publish. A publish is a write and moves it,
+  // even one that changed no value; a service republishing on every loop
+  // shows as a revision that moves while nobody is flipping.
+  uint64 revision = 2;
+}
+
+// The home page: every service that has flags, and every version of it.
+message ListNamespacesRequest {}
+
+message ListNamespacesResponse {
+  repeated Namespace namespaces = 1;
+  uint64 revision = 2;
+}
+
+// Namespace retirement: the garbage collection the version-keyed scheme
+// needs. Every deploy mints service@commit and nothing retired them, so the
+// store accumulated 21 dead dodo namespaces in one evening of deploys. A
+// delete is an OPERATION: it carries a reason, lands in the immutable log,
+// and REPLAYS after a store wipe -- without that, every deleted namespace
+// would resurrect from kafka at the next wipe-recovery.
+message DeleteNamespaceRequest {
+  string service = 1;
+  string version = 2;
+  // Required, same rule as SetFlag: an unexplained delete is how an outage
+  // becomes unexplainable.
+  string reason = 3;
+}
+
+message DeleteNamespaceResponse {
+  int32 flags_removed = 1;
+  uint64 revision = 2;
+}
+
+// The liveness check every client makes before trusting its cache. Kept
+// deliberately trivial -- no store read, no allocation worth naming -- because
+// every service in the mesh calls it and it must never be the reason flipr is
+// slow.
+message PingRequest {}
+
+message PingResponse {
+  // flipr's own version, so a client can notice it is talking to something
+  // it does not expect.
+  string version = 1;
+  // Minted once when the store file is CREATED and persisted inside it, so a
+  // flipr that lost its store comes back wearing a different generation. This
+  // is the wipe report: it rides the liveness check every client already makes
+  // on every read, so nobody has to poll a separate endpoint to learn the
+  // store was nuked. A client that sees the generation change re-publishes its
+  // declared defaults before serving -- the self-heal is collaborative.
+  string store_generation = 2;
+  // The store revision now: rides the ping every client makes, so a client
+  // learns "something changed since I last looked" for the price of the
+  // liveness check it was making anyway, and refreshes only then. A client
+  // compares for inequality, never for "greater than": a store healed from
+  // an emptier file than the one it wrote can answer a lower number, and
+  // any change is a reason to look again.
+  uint64 revision = 3;
+}
+
+service FliprService {
+  rpc GetFlag(GetFlagRequest) returns (GetFlagResponse);
+  rpc GetNamespace(GetNamespaceRequest) returns (GetNamespaceResponse);
+  rpc SetFlag(SetFlagRequest) returns (SetFlagResponse);
+  rpc PublishNamespace(PublishNamespaceRequest) returns (PublishNamespaceResponse);
+  rpc ListNamespaces(ListNamespacesRequest) returns (ListNamespacesResponse);
+  rpc DeleteNamespace(DeleteNamespaceRequest) returns (DeleteNamespaceResponse);
+  rpc Ping(PingRequest) returns (PingResponse);
+}

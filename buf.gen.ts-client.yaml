@@ -1,0 +1,24 @@
+# Generation for the standalone TypeScript client package (clients/typescript).
+#
+# The same reasoning as buf.gen.client.yaml, one language over. clients/typescript
+# is its own npm package on purpose: a consumer installing it must not inherit
+# flipr's server dependencies, and it cannot import the server's gen/ without
+# depending on the parent, which is the thing being avoided.
+#
+# So the wire types are generated a THIRD time from the ONE proto, by the one
+# script, into a third module. The duplication is mechanical and gen-freshness
+# covers all of it: run bin/gen.sh and the tree must be clean.
+#
+# protoc-gen-es only, no RPC plugin -- matching the Go template. The wire is
+# protojson over plain HTTP, so a transport plugin would buy nothing and cost
+# every consumer a dependency.
+#
+# target=ts rather than js+dts: the client ships as TypeScript source that the
+# consumer's own toolchain compiles, exactly as the Go client ships .go files.
+version: v2
+plugins:
+  - local: ./clients/typescript/node_modules/.bin/protoc-gen-es
+    out: clients/typescript
+    opt:
+      - target=ts
+      - import_extension=js

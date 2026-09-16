@@ -1,0 +1,179 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flipr
+  namespace: flipr
+  labels:
+    app: flipr
+spec:
+  replicas: 1
+  # RECREATE, NOT ROLLING UPDATE, and this line is why. bbolt is a
+  # single-writer store holding an exclusive file lock, and OpenStore gives up
+  # after 3 seconds if it cannot take it. A rolling update starts the new pod
+  # while the old one still holds the lock, so the new pod crash-loops until
+  # the deadline kills the old one -- an outage with extra steps. Recreate
+  # stops the old pod first. The deploy window this creates is ALREADY the
+  # ruled cost of flipr: every flipr deploy is an outage window, accepted
+  # deliberately.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: flipr
+  template:
+    metadata:
+      labels:
+        app: flipr
+      # Discovery by annotation: the cluster's prometheus scrapes what
+      # declares itself, with zero scrape config. Each environment has its
+      # own prometheus, so this cannot touch another environment's
+      # dashboards: two TSDBs are two TSDBs.
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "15100"
+        prometheus.io/path: /metrics
+    spec:
+      # WAIT FOR KAFKA, rather than dying until it turns up.
+      #
+      # Kafka takes a minute to come up, so flipr waits until kafka is good.
+      #
+      # THE FATAL BELOW IS CORRECT AND STAYS. A flipr that cannot write its
+      # oplog refuses flips by requirement, and that is deliberate. What was
+      # wrong is that the boot order this deployment ALREADY DECLARES ("Kafka
+      # sits BENEATH flipr in the ruled boot order") was asserted and never
+      # enforced -- so on every cluster start flipr came up before kafka was
+      # accepting connections, logged
+      #
+      #   {"level":"fatal","msg":"kafka sink refused to construct",
+      #    "err":"kafka unreachable: dial tcp ...:9092: connection refused"}
+      #
+      # and died, five or six times per boot, until kafka answered. Measured
+      # by the cluster's first kube-state-metrics scrape:
+      # 27 restarts across four or five cluster boots, the highest count in the
+      # estate, and nothing anywhere had ever reported it. flipr is the service
+      # whose unavailability takes down everything downstream BY DESIGN, so
+      # several minutes of crash-looping at every boot is not cosmetic.
+      #
+      # This changes nothing about flipr's behaviour once running. It only makes
+      # the declared ordering real, which is the same thing kafka itself does to
+      # zookeeper one layer down (wait-for-zookeeper in the kafka statefulset).
+      #
+      # cub kafka-ready is Confluent's own readiness check and does a real API
+      # handshake -- a TCP connect is NOT sufficient, because the broker accepts
+      # connections before it can serve. Args are: expected_brokers, timeout.
+      # One broker because this cluster runs one; 300s because kafka takes about
+      # a minute cold and the cost of waiting is nothing next to the cost of a
+      # crash loop.
+      #
+      # The broker address is duplicated from FLIPR_KAFKA_BROKERS below. An init
+      # container cannot read another container's env, so these two must be kept
+      # in step by hand -- change one, change the other.
+      initContainers:
+        - name: wait-for-kafka
+          image: confluentinc/cp-kafka:7.5.0
+          imagePullPolicy: IfNotPresent
+          command:
+            - cub
+            - kafka-ready
+            - -b
+            - kafka.${ENV}.svc.cluster.local:9092
+            - "1"
+            - "300"
+          # Required on every container in this cluster, init containers
+          # included. cub is a JVM tool, so this is sized for a short-lived JVM
+          # rather than the 10m/8Mi a shell loop would need.
+          resources:
+            requests:
+              cpu: 50m
+              memory: 96Mi
+            limits:
+              memory: 320Mi
+      containers:
+        - name: flipr
+          # Tagged with the COMMIT HASH at deploy, never :dev and never
+          # :latest. The version-keyed namespace scheme flipr itself enforces
+          # on every other service applies to flipr first. A prod workload on
+          # a :dev tag was found this week; do not add another.
+          image: flipr:${COMMIT}
+          imagePullPolicy: IfNotPresent
+          env:
+            # Bind beyond loopback INSIDE the pod only; traefik is the front
+            # door and the service is ClusterIP. The image default stays
+            # loopback so ad-hoc runs expose nothing.
+            - name: FLIPR_ADDR
+              value: 0.0.0.0:15100
+            - name: FLIPR_DB
+              value: /state/flipr.db
+            # The oplog file beside the store, on the same volume: the record
+            # of every operation and the replay source after a wipe. kafka
+            # below is its mirror while the bus exists.
+            - name: FLIPR_OPLOG_FILE
+              value: /state/flipr.oplog
+            # The oplog's MIRROR while the bus exists: written after the file,
+            # never the reason a flip fails. Its failures are counted under
+            # flipr_oplog_mirror_errors_total. The init container above still
+            # waits for it, because the sink refuses to construct without it;
+            # both go when the bus is retired.
+            - name: FLIPR_KAFKA_BROKERS
+              value: kafka.${ENV}.svc.cluster.local:9092
+            - name: FLIPR_OPLOG_TOPIC
+              value: flipr.oplog
+            - name: FLIPR_SCHEMA_REGISTRY
+              value: http://schema-registry.${ENV}.svc.cluster.local:8081
+          ports:
+            - name: http
+              containerPort: 15100
+          # MANDATORY in this cluster. Both k3d clusters believe they own the
+          # whole VM's memory, so an unbounded pod starves the other cluster, not
+          # just its neighbours. The limit is generous against measurement:
+          # the store lives in memory but flags are hundreds of bytes.
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "25m"
+            limits:
+              memory: "128Mi"
+              cpu: "500m"
+          # All three probes hit /health, which READS THE STORE and answers 503
+          # naming what is wrong -- never an uncritical 200. Liveness failing
+          # restarts the pod, which for a wedged bbolt mmap is the correct
+          # response.
+          #
+          # THE STARTUP PROBE IS THE REPLAY WINDOW. On a fresh store flipr
+          # replays the op log before it opens the listener, and the replay
+          # deadline is sized from the topic (30s plus 10ms a record), so a
+          # large log takes minutes. Until this probe passes the liveness
+          # probe does not run, so a long replay is not killed by it and
+          # restarted into the same long replay. 30 minutes is the ceiling:
+          # a log that takes longer than that to replay is an operator's
+          # problem, not a restart's.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            failureThreshold: 360
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: state
+              mountPath: /state
+      volumes:
+        - name: state
+          persistentVolumeClaim:
+            claimName: flipr-state

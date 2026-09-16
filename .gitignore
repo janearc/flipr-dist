@@ -1,0 +1,17 @@
+# the built binary, not the proto/flipr package directory -- anchored on purpose
+/flipr
+*.db
+
+# Version-pinned codegen plugins, installed by bin/gen.sh. Build tooling, not
+# source: the pin lives in the script, the binary is disposable.
+.tools/
+
+# The TypeScript client's dependency tree. Same rule as .tools/: build tooling
+# and a version-pinned codegen plugin, installed by bin/gen.sh from the
+# committed lockfile. Disposable; the pin lives in package.json.
+clients/typescript/node_modules/
+clients/typescript/coverage/
+
+# python bytecode -- one .pyc was tracked in clients/python until 2026-09-01
+__pycache__/
+*.pyc
